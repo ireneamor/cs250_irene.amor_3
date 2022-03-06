@@ -1,7 +1,6 @@
 
 #include "TankFunctions.h"  //Header file
 
-
 /**
 * @brief Tank_Initialize: initialize tank object
 *
@@ -17,17 +16,18 @@ void Tank::Tank_Initialize()
     view_width = parser->right - parser->left;
     view_height = parser->top - parser->bottom;
 
-    camera_position = parser->position;
-    camera_view = parser->view;
-    camera_up = parser->up;
-
     //Number of faces per cube and number of vertices per face
     max_faces = parser->faces.size();
     TOTAL_obj = parser->objects.size();
 
-    //Get view matrix
+    //Get view and perspective matrices
     Viewport_Transformation();
+    Perspective_Transform();
+
+    //Start scene with the rooted camera
+    camera_persp = rooted;
     RootedCamera();
+
 
     //Get the color of each face
     //They are the same for all the cubes
@@ -52,10 +52,13 @@ void Tank::Tank_Update()
     //Get inputs from the user
     draw_mode_solid = GetInput();
     
+
+    //Calculate the current camera (sets the w2c matrix)
     if (camera_persp == first)
         FirstPersonCamera();
     else if (camera_persp == third)
         ThirdPersonCamera();
+
 
     //Calculate the new state of each object
     for (int obj = 0; obj < TOTAL_obj; obj++)
@@ -63,13 +66,13 @@ void Tank::Tank_Update()
         //Need to calculate the model to world matrix first
         //Because it is the same for the whole object
         Matrix4 m2w = ModelToWorld(parser->objects[obj], true);
-        Matrix4 w2c = WorldToCamera_GRM();
 
         //Vertices of the cube
         for (int i = 0; i < max_faces; i++)
         {
             auto face = parser->faces[i];
             Rasterizer::Vertex vtx[3];      //Each vertex of the triangle
+            bool draw = true;
 
             for (int j = 0; j < 3; j++)
             {
@@ -82,25 +85,37 @@ void Tank::Tank_Update()
                 //Transform vertices: perspective division and model to world
                 vtx[j].position = persp_transf * w2c * m2w * vtx[j].position;
 
-                //Transform vertices:: perspective division
+                //Culling: don't draw objects behind the camera
+                if (vtx[j].position.z < -parser->nearPlane)
+                {
+                    draw = false;
+                    break;
+                }
+            
+                //Transform vertices: perspective division
                 vtx[j].position.x = vtx[j].position.x / vtx[j].position.w;
                 vtx[j].position.y = vtx[j].position.y / vtx[j].position.w;
                 vtx[j].position.z = vtx[j].position.z / vtx[j].position.w;
                 vtx[j].position.w = vtx[j].position.w / vtx[j].position.w;
 
-                //Transform vertices:: view transformation
+                //Transform vertices: view transformation
                 vtx[j].position = viewport * vtx[j].position;
             }
 
+
+
             //Draw the object
-            if (draw_mode_solid)
-                Rasterizer::DrawTriangleSolid(vtx[0], vtx[1], vtx[2]);
-            else
+            if (draw)
             {
-                //Every line composing the triangle
-                Rasterizer::DrawMidpointLine(vtx[0], vtx[1]);
-                Rasterizer::DrawMidpointLine(vtx[1], vtx[2]);
-                Rasterizer::DrawMidpointLine(vtx[2], vtx[0]);
+                if (draw_mode_solid)
+                    Rasterizer::DrawTriangleSolid(vtx[0], vtx[1], vtx[2]);
+                else
+                {
+                    //Every line composing the triangle
+                    Rasterizer::DrawMidpointLine(vtx[0], vtx[1]);
+                    Rasterizer::DrawMidpointLine(vtx[1], vtx[2]);
+                    Rasterizer::DrawMidpointLine(vtx[2], vtx[0]);
+                }
             }
         }
 
@@ -118,10 +133,10 @@ void Tank::Viewport_Transformation()
 {
     //Viewport transformation
     viewport.Identity();
-    viewport.m[0][0] =  WIDTH / view_width;
-    viewport.m[0][3] =  WIDTH / 2.f;
-    viewport.m[1][1] = -HEIGHT / view_height;
-    viewport.m[1][3] =  HEIGHT / 2.f;
+    viewport.m[0][0] = static_cast<float>(WIDTH);
+    viewport.m[0][3] = WIDTH / 2.f;
+    viewport.m[1][1] = static_cast<float>(-HEIGHT);
+    viewport.m[1][3] = HEIGHT / 2.f;
 
 }
 
@@ -135,87 +150,94 @@ void Tank::Perspective_Transform()
 {
     float a = static_cast<float>(WIDTH) / HEIGHT;
 
-    //Perspective projectio//n
-    persp_transf.m[0][0] = parser->distance / view_width;       //parser->focal;//
-    persp_transf.m[1][1] = a * parser->distance / view_width;   //parser->focal;//
+    //Perspective projection
+    persp_transf.m[0][0] = parser->focal / view_width;
+    persp_transf.m[1][1] = a * parser->focal / view_width;
     persp_transf.m[2][2] = (-parser->nearPlane - parser->farPlane) / (parser->farPlane - parser->nearPlane);
-    persp_transf.m[2][2] = (-2 * parser->nearPlane * parser->farPlane) / (parser->farPlane - parser->nearPlane);
+    persp_transf.m[2][3] = (-2 * parser->nearPlane * parser->farPlane) / (parser->farPlane - parser->nearPlane);
     persp_transf.m[3][2] = -1;
 
-    if (camera_persp == rooted)
-    {
-        Matrix4 persp_transf2;
-        persp_transf2.Identity();
-        persp_transf2.m[3][2] = -1 / parser->focal;
-        persp_transf2.m[3][3] = 0;
-    }
 }
 
 
 
+/**
+* @brief FirstPersonCamera: set the camera info for the first person camera
+*                           and calculate the corresponding w2c matrix
+*
+* @param (void)
+*/
 void Tank::FirstPersonCamera()
 {
+    //Calculate the m2w matrix of the turret
     CS250Parser::Transform* turret = FindObject("turret");
-    CS250Parser::Transform* joint = FindObject("joint");
-    CS250Parser::Transform* body = FindObject("body");
+    Matrix4 m2w_turret = ModelToWorld(*turret, true);
 
-    float angle = turret->rot.y + body->rot.y;
+    //Set the camera information
+    camera_position = m2w_turret * parser->position;    
+    camera_view = m2w_turret * (-parser->view);
+    camera_up = parser->up;
 
-    camera_position = turret->pos;
-
-    Vector4 turret_Z;
-    turret_Z.z = sin(angle);
-    turret_Z.y = sin(turret->rot.y);
-    turret_Z.x = cos(angle);
-    
-    camera_view = turret_Z;
-    camera_up = Vector4(0,1,0);
-
-    //camera_right = camera_view.Cross(camera_up);
-
-    Perspective_Transform();
+    //Set the new w2c matrix
+    w2c = WorldToCamera_GRM();
 }
 
+
+/**
+* @brief RootedCamera: set the camera info for the rooted camera
+*                      and calculate the corresponding w2c matrix
+*
+* @param (void)
+*/
 void Tank::RootedCamera()
 {
+    //Set the camera information
     camera_position = parser->position;
     camera_view = parser->view;
     camera_up = parser->up;
 
-    Perspective_Transform();
+    //Set the new w2c matrix
+    w2c = WorldToCamera_GRM();
 }
 
+
+/**
+* @brief ThirdPersonCamera: set the camera info for the third person camera
+*                           and calculate the corresponding w2c matrix
+*
+* @param (void)
+*/
 void Tank::ThirdPersonCamera()
 {
-    CS250Parser::Transform *body_ = FindObject("body");
-    CS250Parser::Transform *joint_ = FindObject("joint");
+    //Calculate the m2w matrix of the body
+    CS250Parser::Transform* body = FindObject("body");
+    Matrix4 m2w_body = ModelToWorld(*body, true);
 
-    Vector4 body_Z, body_Y;
+    //Get the vectors of the tank for the new camera
+    Point4 tank_pos = m2w_body * parser->position;
+    Vector4 tank_fwd = m2w_body * (-parser->view);
+    tank_fwd.Normalize();
+    Vector4 tank_up = m2w_body * (parser->up);
+    tank_up.Normalize();
 
-    float angle_bodyY = body_->rot.y;
-    body_Z.x = cos(angle_bodyY);
-    body_Z.y = 0;                 //??
-    body_Z.z = sin(angle_bodyY);
-
-    float angle_jointX = joint_->rot.x;
-    body_Y.x = cos(angle_jointX);
-    body_Y.y = sin(angle_jointX); 
-    body_Y.z = 0;                    //??
-
-    Vector4 tank_fwd = body_Z;
-    Vector4 tank_up = body_Y;
-
-
-    camera_position = body_->pos - tank_fwd*parser->distance + tank_up*parser->height;
-    camera_view = (body_->pos - camera_position) / (body_->pos - camera_position).Length();
+    //Set the camera information
+    camera_position = tank_pos - tank_fwd * parser->distance + tank_up * parser->height;
+    camera_view = ((tank_pos - camera_position) / (tank_pos - camera_position).Length());
     
-    Vector4 camera_right = camera_view.Cross(camera_up);
+    Vector4 camera_right = camera_view.Cross(parser->up);
     camera_up = camera_right.Cross(camera_view);
 
-    Perspective_Transform();
+    //Set the new w2c matrix
+    w2c = WorldToCamera_GRM();
 }
 
 
+/**
+* @brief WorldToCamera_GRM:  calculate the world to camera matrix
+*
+* @param (void)
+* @return                    the matrix of the world to camera transformation
+*/
 Matrix4 Tank::WorldToCamera_GRM()
 {
     //Translation
@@ -228,10 +250,10 @@ Matrix4 Tank::WorldToCamera_GRM()
     }
 
     //Rotation
-    Matrix4 Rot, RotX, RotY, RotZ;
+    Matrix4 RotX, RotY, RotZ;
     {
         //Rotation y-axis
-        float length_Y = sqrt((camera_view.x * camera_view.x) + (camera_view.z * camera_view.z));
+        float length_Y = sqrtf((camera_view.x * camera_view.x) + (camera_view.z * camera_view.z));
         float cos_Y =  camera_view.z / length_Y;
         float sin_Y = -camera_view.x / length_Y;
 
@@ -243,9 +265,10 @@ Matrix4 Tank::WorldToCamera_GRM()
 
 
         //Rotation x-axis
-        float length_X = sqrt((camera_view.x * camera_view.x) + (camera_view.y * camera_view.y) + (camera_view.z * camera_view.z));
-        float cos_X = -length_Y / length_X;
-        float sin_X = -camera_view.y / length_X;
+        Vector4 view_prime = RotY * Transl * camera_view;
+        float length_X = sqrtf((view_prime.y * view_prime.y) + (view_prime.z * view_prime.z));
+        float cos_X = -view_prime.z / length_X;
+        float sin_X = -view_prime.y / length_X;
 
         RotX.Identity();
         RotX.m[1][1] = cos_X;
@@ -257,8 +280,7 @@ Matrix4 Tank::WorldToCamera_GRM()
         Vector4 up_prime = RotX * RotY * Transl * camera_up;
 
         //Rotation z-axis
-        float length_Z = sqrt((up_prime.x * up_prime.x) + (up_prime.y * up_prime.y));
-        float l = up_prime.Length();
+        float length_Z = sqrtf((up_prime.x * up_prime.x) + (up_prime.y * up_prime.y));
         float cos_Z = up_prime.y / length_Z;
         float sin_Z = up_prime.x / length_Z;
 
@@ -267,9 +289,6 @@ Matrix4 Tank::WorldToCamera_GRM()
         RotZ.m[0][1] = -sin_Z;
         RotZ.m[1][0] = sin_Z;
         RotZ.m[1][1] = cos_Z;
-
-        //Concatenate rotations
-        Rot = RotZ * RotX * RotY;
     }
 
     Matrix4 w2c = RotZ * RotX * RotY * Transl;
@@ -380,43 +399,67 @@ bool Tank::GetInput()
 {
     //Tank body rotation
     if (sf::Keyboard::isKeyPressed(sf::Keyboard::A))
-        FindObject("body")->rot.y += 0.05f;
+    {
+        if(CS250Parser::Transform* body = FindObject("body"))
+            body->rot.y += 0.05f;
+    }
 
     if (sf::Keyboard::isKeyPressed(sf::Keyboard::D))
-        FindObject("body")->rot.y -= 0.05f;
+    {
+        if (CS250Parser::Transform* body = FindObject("body"))
+            body->rot.y -= 0.05f;
+    }
 
 
     //Turret rotation
     if (sf::Keyboard::isKeyPressed(sf::Keyboard::Q))
-        FindObject("turret")->rot.y += 0.05f;
+    {
+        if (CS250Parser::Transform* turret = FindObject("turret"))
+            turret->rot.y += 0.05f;
+    }
 
     if (sf::Keyboard::isKeyPressed(sf::Keyboard::E))
-        FindObject("turret")->rot.y -= 0.05f;
+    {
+        if (CS250Parser::Transform* turret = FindObject("turret"))
+            turret->rot.y -= 0.05f;
+    }
 
 
     //Gun rotation
     if (sf::Keyboard::isKeyPressed(sf::Keyboard::F))
-        FindObject("joint")->rot.x += 0.05f;
+    {
+        if (CS250Parser::Transform* joint = FindObject("joint"))
+            joint->rot.x += 0.05f;
+    }
 
     if (sf::Keyboard::isKeyPressed(sf::Keyboard::R))
-        FindObject("joint")->rot.x -= 0.05f;
+    {
+        if (CS250Parser::Transform* joint = FindObject("joint"))
+            joint->rot.x -= 0.05f;
+    }
 
 
     //Move tank forward
     if (sf::Keyboard::isKeyPressed(sf::Keyboard::Space))
     {
         //Move body
-        CS250Parser::Transform* body = FindObject("body");
-        body->pos.z += 1.f * cos(body->rot.y);
-        body->pos.x += 1.f * sin(body->rot.y);
+        if (CS250Parser::Transform* body = FindObject("body"))
+        {
+            body->pos.z += 5.f * cos(body->rot.y);
+            body->pos.x += 5.f * sin(body->rot.y);
+        }
 
         //Turn wheels
-        FindObject("wheel1")->rot.x += 0.1f;
-        FindObject("wheel2")->rot.x += 0.1f;
-        FindObject("wheel3")->rot.x += 0.1f;
-        FindObject("wheel4")->rot.x += 0.1f;
-
+        if(CS250Parser::Transform* wheel1 = FindObject("wheel1"))
+            wheel1->rot.x += 0.5f;
+        if (CS250Parser::Transform* wheel2 = FindObject("wheel2"))
+            wheel2->rot.x += 0.5f;
+        if (CS250Parser::Transform* wheel3 = FindObject("wheel3"))
+            wheel3->rot.x += 0.5f;
+        if (CS250Parser::Transform* wheel4 = FindObject("wheel4"))
+            wheel4->rot.x += 0.5f;
     }
+
 
     //Check solid/wireframe mode
     if (sf::Keyboard::isKeyPressed(sf::Keyboard::Num1))
@@ -424,31 +467,37 @@ bool Tank::GetInput()
     if (sf::Keyboard::isKeyPressed(sf::Keyboard::Num2))
         return true;
 
+
     //Switch camera mode
     if (sf::Keyboard::isKeyPressed(sf::Keyboard::Num3))
         camera_persp = first;
     if (sf::Keyboard::isKeyPressed(sf::Keyboard::Num4))
+        camera_persp = third;
+    if (sf::Keyboard::isKeyPressed(sf::Keyboard::Num5))
     {
         camera_persp = rooted;
         RootedCamera();         //Don't need to call it every time
     }
-    if (sf::Keyboard::isKeyPressed(sf::Keyboard::Num5))
-        camera_persp = third;
 
 
     //Camera distance
     if (sf::Keyboard::isKeyPressed(sf::Keyboard::Z))
-        parser->distance--;
+    {
+        if (parser->distance - 10.f > 0.f)
+            parser->distance -= 10.f;
+    }
     if (sf::Keyboard::isKeyPressed(sf::Keyboard::X))
-        parser->distance++;
+        parser->distance += 10.f;
 
 
     //Camera height
     if (sf::Keyboard::isKeyPressed(sf::Keyboard::H))
-        parser->height--;
+    {
+        if(parser->height - 10.f > 0.f)
+            parser->height -= 10.f;
+    }
     if (sf::Keyboard::isKeyPressed(sf::Keyboard::Y))
-        parser->height++;
-
+        parser->height += 10.f;
 
 
     return draw_mode_solid;
